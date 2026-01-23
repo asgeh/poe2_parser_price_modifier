@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 BASE = "https://www.pathofexile.com"
 REALM = "poe2"
-LEAGUE = "Fate of the Vaal"
+LEAGUE = "Fate of the Vaal"  #sosubibu
 
 UA = "Mozilla/5.0 PoE2JewelComboStats/1.0"
 HEADERS = {"User-Agent": UA, "Accept": "application/json", "Content-Type": "application/json"}
