@@ -13,8 +13,8 @@ import difflib
 from urllib.parse import quote
 
 BASE = "https://www.pathofexile.com"
-REALM = "poe1"
-LEAGUE = "Phrecia 2.0"  #Fate of the Vaal
+REALM = "poe2"
+LEAGUE = "Fate of the Vaal"
 
 UA = "Mozilla/5.0 PoE2JewelComboStats/1.0"
 HEADERS = {"User-Agent": UA, "Accept": "application/json", "Content-Type": "application/json"}
@@ -25,39 +25,30 @@ SESSION.headers.update(HEADERS)
 #JEWEL_TYPE = "Heart of the Well Diamond"          # "Ruby" / "Sapphire" / и т.д.
 
 
-ITEM_NAME = None #например: "Heart of the Well"
-ITEM_TYPE = "Emerald"        # например: "Diamond" (base type) или None
-JEWEL_RARITY = "rare"       # "magic" или "rare"
+ITEM_NAME = "Heart of the Well" #например: "Heart of the Well"
+ITEM_TYPE = None        # например: "Diamond" (base type) или None
+JEWEL_RARITY = "Unique"       # "magic" или "rare"
 
 INDEXED = "12hours"          # окно
 START_MIN_DIV = 1
 MAX_DIV = None               # можно None
 
-FETCH_CHUNK = 10
+FETCH_CHUNK = 5
 SLEEP_SEARCH = 1.5
 SLEEP_FETCH = 2.0
 MAX_FETCH_PER_SEARCH = 100   # важно: мы сознательно берём только топ-100
 
 TOP_PAIRS_TO_SHOW = 20
-MIN_COUNT_TO_RANK = 2
-
-MAX_POOL_STATS = 60   # 40-80 обычно ок, если 400 — уменьши
-
+MIN_COUNT_TO_RANK = 1
 
 ITER_STEPS = 5               # сколько итераций
 AUTO_RAISE_MIN = False       # если True: поднимем min_div до p75 выбранной пары
 
-PRICE_CURRENCY = "divine"   # или "exalted"
-PRICE_CURRENCY_ALIASES = {
-    "divine": {"divine", "divine-orb"},
-    "exalted": {"exalted", "exalted-orb"},
-}
-
 PRICE_WINDOWS = [
-    #(10, 50),
-    #(50, 100),
-    #(100, 200),
-    (200, 300),
+    #(1, 2),
+    #(2, 5),
+    (10, 50),
+    (50, 300),
 ]
 
 LADDER_MINS = [1, 2, 5, 10]     # “сбор кандидатов”
@@ -65,15 +56,10 @@ FINAL_MIN_DIV = 10              # “финальный поиск самых д
 POOL_TOP_PAIRS = 30             # сколько топ-пар брать в пул
 POOL_TOP_MODS = 30              # если хочешь добавлять ещё и одиночные моды
 
-COUNT_MIN_MATCH = 2 if JEWEL_RARITY.lower() in ("magic") else 3 # , "unique"
+COUNT_MIN_MATCH = 2 if JEWEL_RARITY.lower() in ("magic", "unique") else 3
 
 LINK_SEARCH_SLEEP = 4.0      # 3-6 обычно ок
 LINK_FAIL_SLEEP = 15.0       # если словил 429/ошибку — длиннее пауза
-
-# --- лимиты именно для генерации trade-ссылок ---
-ENABLE_TRADE_LINKS = True
-TOP_N_LINKS_PER_SHEET = 10        # сколько строк реально линковать (10-15 обычно норм)
-SLEEP_LINK_SEARCH = 8.0           # пауза между POST /search для ссылок (увеличь если 429)
 
 
 # файл stats (скачай и положи рядом)
@@ -118,61 +104,6 @@ def normalize_mod_text(s: str) -> str:
     s = num_re.sub("#", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s.lower()
-
-def extract_mod_lines(item: dict) -> List[str]:
-    """
-    Собираем ВСЕ 'строки модов' из разных мест item.
-    Для Heart of the Well ключевое — desecrated mods.
-    """
-    lines: List[str] = []
-
-    def add_from(value):
-        if isinstance(value, list):
-            for x in value:
-                if isinstance(x, str) and x.strip():
-                    lines.append(x.strip())
-
-    # классика
-    add_from(item.get("explicitMods"))
-    add_from(item.get("implicitMods"))
-    add_from(item.get("enchantMods"))
-    add_from(item.get("craftedMods"))
-    add_from(item.get("fracturedMods"))
-    add_from(item.get("scourgeMods"))     # на всякий
-    add_from(item.get("crucibleMods"))    # на всякий
-
-    # ВАЖНО: Desecrated — могут лежать так (варианты, т.к. API может отличаться)
-    add_from(item.get("desecratedMods"))  # если есть прямо на верхнем уровне
-
-    # Часто часть модов лежит в extended/mods
-    ext = item.get("extended") or {}
-    mods = ext.get("mods") or {}
-
-    # mods может быть dict со списками по ключам, или list
-    if isinstance(mods, dict):
-        for k in ("explicit", "implicit", "enchant", "crafted", "fractured", "scourge", "desecrated"):
-            add_from(mods.get(k))
-    else:
-        add_from(mods)
-
-    # Если extended.mods — это список объектов, пробуем достать "text"
-    # (на всякий случай)
-    if isinstance(mods, list):
-        for x in mods:
-            if isinstance(x, dict):
-                t = x.get("text")
-                if isinstance(t, str) and t.strip():
-                    lines.append(t.strip())
-
-    # убираем дубликаты, сохраняя порядок
-    seen = set()
-    out = []
-    for s in lines:
-        if s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
-
 
 def safe_name(s: str) -> str:
     s = re.sub(r"[^A-Za-z0-9_-]+", "_", s).strip("_").lower()
@@ -219,27 +150,21 @@ def request_json(method: str, url: str, *, json_body: Optional[dict] = None, tim
     raise RuntimeError("Request failed too many times.")
 
 # --- загрузка stats и маппинг текст -> ids ---
-def load_stat_map(stats_path: str, groups: List[str]) -> Dict[str, List[str]]:
-    """
-    Маппинг нормализованный текст -> список stat_id
-    groups пример: ["explicit", "desecrated"]
-    """
+def load_explicit_stat_map(stats_path: str) -> Dict[str, List[str]]:
     data = json.load(open(stats_path, "r", encoding="utf-8"))
+    explicit_block = next(x for x in data["result"] if x["id"] == "explicit")
+
     m: Dict[str, List[str]] = {}
 
-    for gid in groups:
-        block = next((x for x in data["result"] if x["id"] == gid), None)
-        if not block:
-            print(f"[WARN] stats.json: group '{gid}' not found")
-            continue
+    for e in explicit_block["entries"]:
+        raw_text = e["text"]
 
-        for e in block.get("entries", []):
-            txt = normalize_mod_text(e.get("text", ""))
-            if txt:
-                m.setdefault(txt, []).append(e["id"])
+        # сохраняем несколько ключей (как есть + раскрытые [a|b])
+        for v in expand_bracket_variants(raw_text):
+            key = normalize_mod_text(v)
+            m.setdefault(key, []).append(e["id"])
 
     return m
-
 
 
 def resolve_stat_ids(mod_norm: str, stat_map: Dict[str, List[str]]) -> List[str]:
@@ -264,23 +189,23 @@ def make_trade_url(search_id: str) -> str:
 
 def make_stat_groups_for_exact_combo(combo: str, stat_map: Dict[str, List[str]]) -> List[dict]:
     """
-    Превращает строку 'mod1 | mod2 | mod3' в query.stats для PoE2 trade2:
-    - trade2 НЕ принимает stat group type='or' (как раньше в PoE1),
-      поэтому делаем ОДНУ группу type='and'
-    - для каждого мода берём первый найденный stat_id (ids[0])
-      (это компромисс, но стабильно работает)
+    Превращает строку 'mod1 | mod2 | mod3' в query.stats, где каждый mod = OR по его stat_id,
+    а между модами AND (т.е. должны быть все моды).
     """
-    parts = [p.strip() for p in combo.split(" | ") if p.strip()]  # важно: делим по " | " (с пробелами)
+    parts = [p.strip() for p in combo.split("|") if p.strip()]
+    groups: List[dict] = []
 
-    filters = []
     for mod in parts:
         ids = resolve_stat_ids(mod, stat_map)
         if not ids:
             raise RuntimeError(f"Не нашёл stat_id для мода: {mod}")
-        filters.append({"id": ids[0], "value": {"min": 0}})
 
-    return [{"type": "and", "filters": filters}]
+        groups.append({
+            "type": "or",
+            "filters": [{"id": sid, "value": {"min": 0}} for sid in ids]
+        })
 
+    return groups
 
 def add_trade_links_for_topk(
     topk_df: pd.DataFrame,
@@ -289,56 +214,35 @@ def add_trade_links_for_topk(
     min_div: float,
     max_div: Optional[float],
     top_n_links: int = 25,
-    min_count_for_links: int = 2,
 ) -> pd.DataFrame:
     """
-    1) Фильтруем по count >= min_count_for_links
-    2) Сортируем по count desc, затем median desc
-    3) Генерируем ссылки только для первых top_n_links строк ПОСЛЕ сортировки
+    Делает search под каждое combo (только первые top_n_links строк),
+    добавляет столбец trade_url справа.
     """
 
-    LINK_SEARCH_SLEEP = 4.0
-    LINK_FAIL_SLEEP = 15.0
+    # --- настройки троттлинга именно для линков ---
+    LINK_SEARCH_SLEEP = 4.0   # пауза перед КАЖДЫМ search (3–6 обычно ок)
+    LINK_FAIL_SLEEP = 15.0    # доп. пауза если словили ошибку/429
 
     if topk_df is None or topk_df.empty:
         return topk_df
 
-    df = topk_df.copy()
+    topk_df = topk_df.copy()
+    topk_df["trade_url"] = ""
 
-    # --- 1) фильтр по count ---
-    if "count" in df.columns:
-        df = df[df["count"] >= min_count_for_links].copy()
+    cache: Dict[str, str] = {}  # combo -> url, чтобы не спамить одинаковыми запросами
 
-    if df.empty:
-        return df
-
-    # --- 2) сортировка: сначала count, потом median ---
-    sort_cols = []
-    asc = []
-
-    if "count" in df.columns:
-        sort_cols.append("count"); asc.append(False)
-    if "median" in df.columns:
-        sort_cols.append("median"); asc.append(False)
-
-    if sort_cols:
-        df = df.sort_values(sort_cols, ascending=asc, kind="mergesort").reset_index(drop=True)
-
-    # --- 3) добавляем trade_url ---
-    df["trade_url"] = ""
-
-    cache: Dict[str, str] = {}
-
-    limit = min(len(df), top_n_links)
-    print(f"[LINKS] build links for k={k} rows={limit}/{len(df)} min_div={min_div} sorted_by=count,median")
+    limit = min(len(topk_df), top_n_links)
+    print(f"[LINKS] build links for k={k} rows={limit}/{len(topk_df)} min_div={min_div}")
 
     for i in range(limit):
-        combo = str(df.loc[i, "combo"])
+        combo = str(topk_df.loc[topk_df.index[i], "combo"])
 
         if combo in cache:
-            df.loc[i, "trade_url"] = cache[combo]
+            topk_df.loc[topk_df.index[i], "trade_url"] = cache[combo]
             continue
 
+        # ✅ ВОТ СЮДА: пауза перед каждым поиском
         time.sleep(LINK_SEARCH_SLEEP)
 
         try:
@@ -346,21 +250,22 @@ def add_trade_links_for_topk(
             s = trade_search(min_div, max_div, stat_groups=stat_groups, sort_order="desc")
             url = make_trade_url(s["id"])
             cache[combo] = url
-            df.loc[i, "trade_url"] = url
+            topk_df.loc[topk_df.index[i], "trade_url"] = url
             print(f"[LINKS] k={k} row={i+1} ok")
         except Exception as e:
             print(f"[LINKS] k={k} row={i+1} fail: {e}")
+
+            # ✅ ВОТ СЮДА: доп. пауза если получили ошибку (особенно 429)
             time.sleep(LINK_FAIL_SLEEP)
+            continue
 
-    return df
-
-
+    return topk_df
 
 
 def trade_search(min_div: float, max_div: Optional[float], stat_groups: Optional[List[dict]], sort_order: str = "desc") -> dict:
     url = f"{BASE}/api/trade2/search/{REALM}/{LEAGUE}"
 
-    price_filter = {"min": min_div, "option": PRICE_CURRENCY}
+    price_filter = {"min": min_div, "option": "divine"}
     if max_div is not None:
         price_filter["max"] = max_div
 
@@ -408,20 +313,16 @@ def trade_fetch(ids: List[str], search_id: str) -> dict:
     time.sleep(SLEEP_FETCH)
     return request_json("GET", url, timeout=60)
 
-def parse_price(listing: dict) -> Optional[float]:
+def parse_price_divine(listing: dict) -> Optional[float]:
     price = (listing or {}).get("price")
     if not price:
         return None
-
     cur = str(price.get("currency", "")).lower()
     amt = price.get("amount")
     if amt is None:
         return None
-
-    allowed = PRICE_CURRENCY_ALIASES.get(PRICE_CURRENCY, {PRICE_CURRENCY})
-    if cur not in allowed:
+    if cur not in ("divine", "divine-orb"):
         return None
-
     return float(amt)
 
 def fetch_rows(search_id: str, ids: List[str]) -> List[dict]:
@@ -443,19 +344,18 @@ def fetch_rows(search_id: str, ids: List[str]) -> List[dict]:
             item = hit.get("item", {}) or {}
             listing = hit.get("listing", {}) or {}
 
-            p = parse_price(listing)
+            p = parse_price_divine(listing)
             if p is None:
                 continue
 
-            mod_lines = extract_mod_lines(item)
-            mods_norm = sorted({normalize_mod_text(x) for x in mod_lines if x and str(x).strip()})
+            explicit = item.get("explicitMods", []) or []
+            mods_norm = sorted({normalize_mod_text(x) for x in explicit if x and x.strip()})
 
             out.append({
                 "price_div": p,
                 "mods_norm": mods_norm,
-                "explicit_raw": " || ".join(mod_lines),   # теперь это "все строки модов", не только explicit
+                "explicit_raw": " || ".join(explicit),
             })
-
     return out
 
 def collect_candidates_from_windows():
@@ -566,6 +466,52 @@ def rank_k_combos(df_k: pd.DataFrame, min_count: int) -> pd.DataFrame:
 
 from urllib.parse import quote
 
+def combo_to_mod_texts(combo: str) -> List[str]:
+    # ВАЖНО: делим только по " | " (с пробелами), чтобы не ломать [a|b]
+    return [x.strip() for x in combo.split(" | ") if x.strip()]
+
+def make_and_stat_groups_for_mod_texts(mod_texts: List[str], stat_map: Dict[str, List[str]]) -> List[dict]:
+    filters = []
+    for mt in mod_texts:
+        ids = resolve_stat_ids(mt, stat_map)
+        if not ids:
+            raise RuntimeError(f"Не нашёл stat_id для мода: {mt}")
+        # PoE2 trade2 не принимает type=or -> берём первый id
+        filters.append({"id": ids[0], "value": {"min": 0}})
+    return [{"type": "and", "filters": filters}]
+
+def trade_link_from_search_id(search_id: str) -> str:
+    # trade2 URL (league надо URL-encode)
+    return f"{BASE}/trade2/search/{REALM}/{quote(LEAGUE)}/{search_id}"
+
+def add_trade_links_for_topk(df_top: pd.DataFrame, k: int, stat_map: Dict[str, List[str]],
+                             min_div: float, max_div: Optional[float], top_n_links: int = 25) -> pd.DataFrame:
+    if df_top.empty:
+        return df_top
+
+    df = df_top.copy()
+    df["trade_url"] = ""
+
+    limit = min(top_n_links, len(df))
+    print(f"[LINKS] build links for k={k} rows={limit}/{len(df)} min_div={min_div}")
+
+    for i in range(limit):
+        combo = df.iloc[i]["combo"]
+        try:
+            mod_texts = combo_to_mod_texts(combo)
+            if len(mod_texts) != k:
+                raise RuntimeError(f"combo split != k (got {len(mod_texts)}): {mod_texts}")
+
+            stat_groups = make_and_stat_groups_for_mod_texts(mod_texts, stat_map)
+            s = trade_search(min_div, max_div, stat_groups, sort_order="desc")
+            df.at[df.index[i], "trade_url"] = trade_link_from_search_id(s["id"])
+            print(f"[LINKS] k={k} row={i+1} ok")
+
+        except Exception as e:
+            print(f"[LINKS] k={k} row={i+1} fail: {e}")
+
+    return df
+
 
 def make_stat_groups_count_from_top_combos(
     ranked_combos: pd.DataFrame,
@@ -574,35 +520,23 @@ def make_stat_groups_count_from_top_combos(
     min_match: int = 2,
 ) -> Tuple[List[dict], List[str]]:
 
-    # берём топ-комбо в порядке важности (у тебя они уже отсортированы)
     combos = ranked_combos.head(top_n_combos)["combo"].tolist()
 
-    # собираем моды В ПОРЯДКЕ ПОЯВЛЕНИЯ (а не через set), чтобы первые были “самые важные”
-    pool_mods_ordered: List[str] = []
-    seen = set()
+    pool_mods = set()
     for c in combos:
-        for part in c.split(" | "):   # важно: по " | "
-            m = part.strip()
-            if m and m not in seen:
-                seen.add(m)
-                pool_mods_ordered.append(m)
+        for part in c.split("|"):
+            pool_mods.add(part.strip())
 
-    pool_stat_ids: List[str] = []
-    missing: List[str] = []
-
-    for mod in pool_mods_ordered:
+    pool_stat_ids = []
+    missing = []
+    for mod in sorted(pool_mods):
         ids = resolve_stat_ids(mod, stat_map)
         if ids:
-            # ✅ ВАЖНО: берём только один id, иначе взорвём сложность запроса
-            pool_stat_ids.append(ids[0])
+            pool_stat_ids.extend(ids)
         else:
             missing.append(mod)
 
-        # ✅ ВАЖНО: режем пул по лимиту сложности
-        if len(pool_stat_ids) >= MAX_POOL_STATS:
-            break
-
-    pool_stat_ids = list(dict.fromkeys(pool_stat_ids))  # уникализация без потери порядка
+    pool_stat_ids = sorted(set(pool_stat_ids))
     if not pool_stat_ids:
         raise RuntimeError("Пул stat_id пустой (ничего не сматчилось со stats.json).")
 
@@ -623,7 +557,7 @@ def build_pool_count_groups(df_candidates: pd.DataFrame, stat_map: Dict[str, Lis
     elif rar == "rare":
         k_targets = [3, 4]
     elif rar == "unique":
-        k_targets = [3, 4]          # <-- ключевая правка
+        k_targets = [2]          # <-- ключевая правка
     else:
         k_targets = [2]
 
@@ -653,8 +587,6 @@ def build_pool_count_groups(df_candidates: pd.DataFrame, stat_map: Dict[str, Lis
         min_match=count_min_match,
     )
 
-    print("[DEBUG] count filters:", len(stat_groups[0]["filters"]), "min_match:", stat_groups[0]["value"]["min"])
-
     return stat_groups, ranked_combos, top_mods, missing
 
 def final_hunt(stat_groups):
@@ -666,16 +598,12 @@ def final_hunt(stat_groups):
         return pd.DataFrame()
 
     rows = fetch_rows(s["id"], ids)
-
-    print("[DEBUG] example explicit_raw:", rows[0]["explicit_raw"] if rows else "NO ROWS")
-    print("[DEBUG] mods_norm:", rows[0]["mods_norm"] if rows else "NO ROWS")
-
     return pd.DataFrame(rows)
 
 
 # --- итератор ---
 def run_pipeline():
-    stat_map = load_stat_map(STATS_PATH, groups=["explicit", "implicit", "desecrated"])
+    stat_map = load_explicit_stat_map(STATS_PATH)
 
     print(f"[CONFIG] type={ITEM_TYPE} rarity={JEWEL_RARITY} indexed={INDEXED} ladder_mins={LADDER_MINS} final_min={FINAL_MIN_DIV} count_min={COUNT_MIN_MATCH}")
 
@@ -706,53 +634,23 @@ def run_pipeline():
     final_top_k3 = pd.DataFrame()
     final_top_k4 = pd.DataFrame()
 
-    rar = JEWEL_RARITY.lower()
-
-    if rar in ("magic"): # , "unique"
+    if JEWEL_RARITY == "magic":
         final_top_k2 = analyze_top_k(df_final, k=2, top_n=50, min_count=MIN_COUNT_TO_RANK)
-
-        # ✅ фильтруем таблицу сразу (как ты потом фильтруешь в Excel)
-        if not final_top_k2.empty and "count" in final_top_k2.columns:
-            final_top_k2 = final_top_k2[final_top_k2["count"] >= 2].copy()
-
     else:
         final_top_k3 = analyze_top_k(df_final, k=3, top_n=50, min_count=MIN_COUNT_TO_RANK)
         final_top_k4 = analyze_top_k(df_final, k=4, top_n=50, min_count=MIN_COUNT_TO_RANK)
 
-        # ✅ фильтруем таблицы сразу
-        if not final_top_k3.empty and "count" in final_top_k3.columns:
-            final_top_k3 = final_top_k3[final_top_k3["count"] >= 2].copy()
-        if not final_top_k4.empty and "count" in final_top_k4.columns:
-            final_top_k4 = final_top_k4[final_top_k4["count"] >= 2].copy()
-
-    # # --- добавим ссылки ТОЛЬКО если df не пустой ---
-    # if not final_top_k2.empty:
-    #     final_top_k2 = add_trade_links_for_topk(
-    #         final_top_k2, 2, stat_map, FINAL_MIN_DIV, MAX_DIV,
-    #         top_n_links=10,
-    #         min_count_for_links=2
-    #     )
-
-    # if not final_top_k3.empty:
-    #     final_top_k3 = add_trade_links_for_topk(
-    #         final_top_k3, 3, stat_map, FINAL_MIN_DIV, MAX_DIV,
-    #         top_n_links=10,
-    #         min_count_for_links=2
-    #     )
-
-    # if not final_top_k4.empty:
-    #     final_top_k4 = add_trade_links_for_topk(
-    #         final_top_k4, 4, stat_map, FINAL_MIN_DIV, MAX_DIV,
-    #         top_n_links=10,
-    #         min_count_for_links=2
-    #     )
-
-
+    # --- добавим ссылки ТОЛЬКО если df не пустой ---
+    if not final_top_k2.empty:
+        final_top_k2 = add_trade_links_for_topk(final_top_k2, 2, stat_map, FINAL_MIN_DIV, MAX_DIV, top_n_links=25)
+    if not final_top_k3.empty:
+        final_top_k3 = add_trade_links_for_topk(final_top_k3, 3, stat_map, FINAL_MIN_DIV, MAX_DIV, top_n_links=25)
+    if not final_top_k4.empty:
+        final_top_k4 = add_trade_links_for_topk(final_top_k4, 4, stat_map, FINAL_MIN_DIV, MAX_DIV, top_n_links=25)
 
     top_mods_final = analyze_top_mods(df_final, top_n=50)
 
-    name_part = safe_name(ITEM_NAME) if ITEM_NAME else safe_name(ITEM_TYPE)
-    out_path = f"poe2_{name_part}_{JEWEL_RARITY}_{INDEXED}_meta_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    out_path = f"poe2_{safe_name(ITEM_TYPE)}_{JEWEL_RARITY}_{INDEXED}_meta_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     with pd.ExcelWriter(out_path, engine="openpyxl") as w:
         df_candidates.to_excel(w, index=False, sheet_name="candidates_raw")
         pool_combos.to_excel(w, index=False, sheet_name="pool_top_combos")
