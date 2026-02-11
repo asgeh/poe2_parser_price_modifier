@@ -15,13 +15,13 @@ class PipelineConfig:
 
     indexed: str = "12hours"
     final_min_div: float = 10
-    max_div: Optional[float] = None
+    max_div: Optional[float] = 1000
     price_currency: str = "divine"
 
     fetch_chunk: int = 10
     max_fetch_per_search: int = 100
     sleep_search: float = 1.5
-    sleep_fetch: float = 2.0
+    sleep_fetch: float = 1
 
     top_pairs_in_pool: int = 30
     top_mods_in_pool: int = 30
@@ -32,7 +32,14 @@ class PipelineConfig:
     price_windows: list[tuple[float, float]] = field(default_factory=lambda: [(200, 300)])
 
     stats_path: Path = Path("stats.json")
-    output_dir: Path = Path(".")
+    output_dir: Path = Path("reports")
+
+    candidate_passes: int = 5
+    stop_when_no_new: bool = False
+    use_cache: bool = True
+    cache_path: Path = Path("cache.json")
+    refresh_cache: bool = False
+    poesessid: Optional[str] = None
 
     user_agent: str = "Mozilla/5.0 PoE2JewelComboStats/2.0"
 

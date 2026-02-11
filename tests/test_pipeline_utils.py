@@ -1,4 +1,4 @@
-from poe2_price_modifier.pipeline import (
+from poe2_price_modifier.utils import (
     expand_bracket_variants,
     extract_mod_lines,
     normalize_mod_text,

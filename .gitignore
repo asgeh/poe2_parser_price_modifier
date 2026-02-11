@@ -1,3 +1,26 @@
-﻿*xlsx
+*.xlsx
+!reports/*.xlsx
 __pycache__/
-.pyc
+*.pyc
+*.pyo
+*.pyd
+
+# Python/virtualenv
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging/build
+build/
+dist/
+*.egg-info/
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local caches and outputs
+cache*.json

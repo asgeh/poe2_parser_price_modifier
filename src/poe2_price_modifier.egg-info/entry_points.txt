@@ -1,2 +1,0 @@
-[console_scripts]
-poe2-price-modifier = poe2_price_modifier.cli:main

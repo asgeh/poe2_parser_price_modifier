@@ -21,6 +21,7 @@ dev = [
 
 [project.scripts]
 poe2-price-modifier = "poe2_price_modifier.cli:main"
+poe2-price-modifier-debug = "poe2_price_modifier.debug_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -1,4 +1,4 @@
-# POE2 Price Modifier Analyzer
+﻿# POE2 Price Modifier Analyzer
 
 Профессионально структурированный Python-проект для анализа дорогих jewel-ов в трейде Path of Exile и построения отчётов по комбинациям модификаторов.
 
@@ -19,11 +19,18 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+Windows (PowerShell):
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+```
+
 ## Быстрый запуск
 
 ```bash
 poe2-price-modifier \
-  --league "Phrecia 2.0" \
+  --league "Fate of the Vaal" \
   --item-type "Emerald" \
   --rarity rare \
   --final-min-div 10 \
@@ -32,6 +39,30 @@ poe2-price-modifier \
 ```
 
 Результат: Excel-файл с листами кандидатов, пула комбинаций, финальных результатов и метаданных.
+Файлы сохраняются в папку `reports/`.
+
+## Памятка запуска
+
+1. Обычный запуск (установленный CLI):
+```bash
+poe2-price-modifier
+```
+
+2. Запуск с параметрами:
+```bash
+poe2-price-modifier --league "Fate of the Vaal" --item-type "Emerald" --rarity rare --candidate-passes 5 --final-min-div 10
+```
+
+3. Запуск без установки (через модуль):
+```bash
+PYTHONPATH=src python -m poe2_price_modifier.cli --candidate-passes 5 --verbose
+```
+
+Windows (PowerShell):
+```powershell
+$env:PYTHONPATH="src"
+python -m poe2_price_modifier.cli --candidate-passes 5 --verbose
+```
 
 ## Запуск тестов
 
