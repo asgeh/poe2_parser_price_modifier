@@ -8,7 +8,7 @@ from .pipeline import run_pipeline
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze expensive POE jewel modifiers and export Excel report")
-    parser.add_argument("--league", default="Phrecia 2.0")
+    parser.add_argument("--league", default="Fate of the Vaal")
     parser.add_argument("--item-name", default=None)
     parser.add_argument("--item-type", default="Emerald")
     parser.add_argument("--rarity", default="rare", choices=["magic", "rare", "unique"])

@@ -6,8 +6,8 @@ from typing import Optional
 @dataclass(slots=True)
 class PipelineConfig:
     base_url: str = "https://www.pathofexile.com"
-    realm: str = "poe1"
-    league: str = "Phrecia 2.0"
+    realm: str = "poe2"
+    league: str = "Fate of the Vaal"
 
     item_name: Optional[str] = None
     item_type: str = "Emerald"
