@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 import time
 from dataclasses import dataclass
@@ -455,6 +456,116 @@ def build_count_stat_group(
     )
 
 
+def classify_weapon_tags(mod: str) -> set[str]:
+    text = mod.lower()
+    tags: set[str] = set()
+    if "crossbow" in text:
+        tags.add("crossbow")
+    if "spear" in text:
+        tags.add("spear")
+    if "quarterstaff" in text or "quarterstave" in text:
+        tags.add("quarterstaff")
+    if "mace" in text:
+        tags.add("mace")
+    if "bow" in text and "crossbow" not in text:
+        tags.add("bow")
+    return tags
+
+
+def extract_weapon_tags(stats_path: Path) -> list[str]:
+    data = json.loads(stats_path.read_text(encoding="utf-8"))
+    texts: list[str] = []
+    for block in data.get("result", []):
+        for entry in block.get("entries", []):
+            text = entry.get("text")
+            if isinstance(text, str):
+                texts.append(text.lower())
+
+    bracket = re.compile(r"\[([^\]|]+)\|([^\]]+)\]")
+    with_pat = re.compile(r"\bwith\s+([a-z][a-z\s-]+)")
+
+    candidates: set[str] = set()
+    for text in texts:
+        for left, right in bracket.findall(text):
+            candidates.add(left.strip())
+            candidates.add(right.strip())
+        for m in with_pat.finditer(text):
+            phrase = m.group(1).strip()
+            phrase = re.split(r"\b(and|or)\b", phrase)[0].strip()
+            if len(phrase.split()) <= 3:
+                candidates.add(phrase)
+
+    # Normalize to canonical weapon tags.
+    mapping = {
+        "bows": "bow",
+        "bow": "bow",
+        "crossbows": "crossbow",
+        "crossbow": "crossbow",
+        "spears": "spear",
+        "spear": "spear",
+        "quarterstaves": "quarterstaff",
+        "quarterstaff": "quarterstaff",
+        "quarterstave": "quarterstaff",
+        "maces": "mace",
+        "mace": "mace",
+    }
+    weapon_roots = ("bow", "crossbow", "spear", "quarterstaff", "mace")
+
+    tags: set[str] = set()
+    for cand in candidates:
+        canon = mapping.get(cand)
+        if canon:
+            tags.add(canon)
+            continue
+        if any(root in cand for root in weapon_roots):
+            for root in weapon_roots:
+                if root in cand:
+                    tags.add(root)
+                    break
+
+    return sorted(tags)
+
+
+def build_weapon_queries(
+    client: TradeClient,
+    config: PipelineConfig,
+    stat_map: dict[str, list[str]],
+    mods: list[str],
+    weapon_tags: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    query_rows: list[dict[str, Any]] = []
+    mod_rows: list[dict[str, Any]] = []
+
+    for tag in weapon_tags:
+        tag_mods = [m for m in mods if tag in classify_weapon_tags(m)]
+        if not tag_mods:
+            continue
+
+        stat_groups, missing_mods, used_mods = build_count_stat_group(tag_mods, config, stat_map)
+        if stat_groups and stat_groups[0].get("filters"):
+            min_count = min(int(stat_groups[0]["value"]["min"]), len(stat_groups[0]["filters"]))
+            stat_groups[0]["value"]["min"] = min_count
+
+        search = client.trade_search(config.final_min_div, config.max_div, stat_groups=stat_groups)
+        url = make_trade_url(config.base_url, config.realm, config.league, search["id"])
+
+        query_rows.append(
+            {
+                "weapon_tag": tag,
+                "final_min_div": config.final_min_div,
+                "final_max_div": config.max_div,
+                "count_min_match": stat_groups[0]["value"]["min"] if stat_groups else None,
+                "stats_used": len(used_mods),
+                "missing_mods": len(missing_mods),
+                "trade_search_url": url,
+            }
+        )
+        for entry in used_mods:
+            mod_rows.append({"weapon_tag": tag, **entry})
+
+    return query_rows, mod_rows
+
+
 def collect_candidates(client: TradeClient, config: PipelineConfig, known_ids: Optional[set[str]] = None) -> tuple[pd.DataFrame, set[str]]:
     pd = _pd()
     all_rows: list[dict[str, Any]] = []
@@ -629,6 +740,18 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
         empty_sellers = pd.DataFrame(columns=["seller_account", "count", "max"])
         empty_mods_by_pass = pd.DataFrame(columns=["pass_index", "mod", "count", "max", "share_pass"])
         empty_sellers_by_mod = pd.DataFrame(columns=["mod", "seller_account", "count", "share_mod"])
+        empty_weapon_queries = pd.DataFrame(
+            columns=[
+                "weapon_tag",
+                "final_min_div",
+                "final_max_div",
+                "count_min_match",
+                "stats_used",
+                "missing_mods",
+                "trade_search_url",
+            ]
+        )
+        empty_weapon_mods = pd.DataFrame(columns=["weapon_tag", "mod", "stat_id"])
         empty_final = pd.DataFrame(columns=["price_div", "mods_norm", "explicit_raw"])
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -638,6 +761,8 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
             empty_sellers.to_excel(writer, index=False, sheet_name="top_sellers")
             empty_mods_by_pass.to_excel(writer, index=False, sheet_name="mods_by_pass")
             empty_sellers_by_mod.to_excel(writer, index=False, sheet_name="top_sellers_by_mod")
+            empty_weapon_queries.to_excel(writer, index=False, sheet_name="final_query_by_weapon")
+            empty_weapon_mods.to_excel(writer, index=False, sheet_name="final_query_mods_weapon")
             pd.DataFrame(columns=["mod", "stat_id"]).to_excel(writer, index=False, sheet_name="final_query_mods")
             empty_final.to_excel(writer, index=False, sheet_name="final_raw")
             empty_mods.to_excel(writer, index=False, sheet_name="final_top_mods")
@@ -682,6 +807,15 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
     top_sellers_by_mod = analyze_top_sellers_by_mod(analysis_candidates)
     mods_by_pass = analyze_mods_by_pass(analysis_candidates)
     stat_groups, missing_mods, final_query_mods = build_count_stat_group(top_mods["mod"].tolist(), config, stat_map)
+    weapon_tags = extract_weapon_tags(config.stats_path)
+    LOGGER.info("weapon tags from stats: %s", weapon_tags)
+    weapon_query_rows, weapon_query_mods = build_weapon_queries(
+        client,
+        config,
+        stat_map,
+        top_mods["mod"].tolist(),
+        weapon_tags=weapon_tags,
+    )
 
     final_search = client.trade_search(config.final_min_div, config.max_div, stat_groups=stat_groups)
     final_trade_url = make_trade_url(config.base_url, config.realm, config.league, final_search["id"])
@@ -731,6 +865,8 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
         top_sellers_by_mod.to_excel(writer, index=False, sheet_name="top_sellers_by_mod")
         mods_by_pass.to_excel(writer, index=False, sheet_name="mods_by_pass")
         pd.DataFrame(final_query_mods).to_excel(writer, index=False, sheet_name="final_query_mods")
+        pd.DataFrame(weapon_query_rows).to_excel(writer, index=False, sheet_name="final_query_by_weapon")
+        pd.DataFrame(weapon_query_mods).to_excel(writer, index=False, sheet_name="final_query_mods_weapon")
 
         final_df.to_excel(writer, index=False, sheet_name="final_raw")
         sort_by_count_desc(final_top_mods).to_excel(writer, index=False, sheet_name="final_top_mods")
