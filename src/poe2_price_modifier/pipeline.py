@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import logging
 import time
 from dataclasses import dataclass
@@ -456,65 +455,6 @@ def build_count_stat_group(
     )
 
 
-_WEAPON_TAG_RE: dict[str, "re.Pattern[str]"] = {
-    "crossbow": re.compile(r"\bcrossbows?\b"),
-    "spear": re.compile(r"\bspears?\b"),
-    "quarterstaff": re.compile(r"\bquarterstaves?\b|\bquarterstaffs?\b"),
-    "mace": re.compile(r"\bmaces?\b"),
-    "bow": re.compile(r"\bbows?\b"),
-}
-_WEAPON_TAGS: tuple[str, ...] = tuple(sorted(_WEAPON_TAG_RE))
-
-
-def classify_weapon_tags(mod: str) -> set[str]:
-    text = mod.lower()
-    return {tag for tag, pat in _WEAPON_TAG_RE.items() if pat.search(text)}
-
-
-def build_weapon_queries(
-    client: TradeClient,
-    config: PipelineConfig,
-    stat_map: dict[str, list[str]],
-    mods: list[str],
-    weapon_tags: tuple[str, ...],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    query_rows: list[dict[str, Any]] = []
-    mod_rows: list[dict[str, Any]] = []
-
-    mod_tag_map = {m: classify_weapon_tags(m) for m in mods}
-
-    for tag in weapon_tags:
-        tag_mods = [m for m in mods if tag in mod_tag_map[m]]
-        if not tag_mods:
-            continue
-
-        try:
-            stat_groups, missing_mods, used_mods = build_count_stat_group(tag_mods, config, stat_map)
-            if stat_groups and stat_groups[0].get("filters"):
-                min_count = min(int(stat_groups[0]["value"]["min"]), len(stat_groups[0]["filters"]))
-                stat_groups[0]["value"]["min"] = min_count
-
-            search = client.trade_search(config.final_min_div, config.max_div, stat_groups=stat_groups)
-            url = make_trade_url(config.base_url, config.realm, config.league, search["id"])
-        except Exception as exc:
-            LOGGER.warning("weapon query for tag %r skipped: %s", tag, exc)
-            continue
-
-        query_rows.append(
-            {
-                "weapon_tag": tag,
-                "final_min_div": config.final_min_div,
-                "final_max_div": config.max_div,
-                "count_min_match": stat_groups[0]["value"]["min"],
-                "stats_used": len(used_mods),
-                "missing_mods": len(missing_mods),
-                "trade_search_url": url,
-            }
-        )
-        for entry in used_mods:
-            mod_rows.append({"weapon_tag": tag, **entry})
-
-    return query_rows, mod_rows
 
 
 def collect_candidates(client: TradeClient, config: PipelineConfig, known_ids: Optional[set[str]] = None) -> tuple[pd.DataFrame, set[str]]:
@@ -661,15 +601,11 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
         output_path = config.output_dir / f"{config.output_name()}_meta_pipeline_{timestamp}.xlsx"
         empty_combos = pd.DataFrame(columns=["k", "combo", "count", "max"])
         empty_mods = pd.DataFrame(columns=["mod", "count", "max", "share_total"])
-        empty_weapon_queries = pd.DataFrame(
-            columns=["weapon_tag", "final_min_div", "final_max_div", "count_min_match", "stats_used", "missing_mods", "trade_search_url"]
-        )
         empty_final = pd.DataFrame(columns=["price_div", "mods_norm", "explicit_raw"])
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
             empty_mods.to_excel(writer, index=False, sheet_name="pool_top_mods")
             empty_combos.to_excel(writer, index=False, sheet_name="pool_top_combos")
-            empty_weapon_queries.to_excel(writer, index=False, sheet_name="final_query_by_weapon")
             empty_final.to_excel(writer, index=False, sheet_name="final_raw")
             empty_mods.to_excel(writer, index=False, sheet_name="final_top_mods")
             empty_combos.to_excel(writer, index=False, sheet_name="final_top_combos")
@@ -702,17 +638,6 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
     top_mods = analyze_top_mods(analysis_candidates, top_n=config.top_mods_in_pool)
     pool_mods = top_mods["mod"].tolist()
     stat_groups, missing_mods, _ = build_count_stat_group(pool_mods, config, stat_map)
-    if config.item_category == "jewel":
-        LOGGER.info("weapon tags: %s", _WEAPON_TAGS)
-        weapon_query_rows, _ = build_weapon_queries(
-            client,
-            config,
-            stat_map,
-            pool_mods,
-            weapon_tags=_WEAPON_TAGS,
-        )
-    else:
-        weapon_query_rows = []
 
     final_search = client.trade_search(config.final_min_div, config.max_div, stat_groups=stat_groups)
     final_trade_url = make_trade_url(config.base_url, config.realm, config.league, final_search["id"])
@@ -755,7 +680,6 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         sort_by_count_desc(top_mods).to_excel(writer, index=False, sheet_name="pool_top_mods")
         sort_by_count_desc(ranked_combos).to_excel(writer, index=False, sheet_name="pool_top_combos")
-        pd.DataFrame(weapon_query_rows).to_excel(writer, index=False, sheet_name="final_query_by_weapon")
         final_df.to_excel(writer, index=False, sheet_name="final_raw")
         sort_by_count_desc(final_top_mods).to_excel(writer, index=False, sheet_name="final_top_mods")
         sort_by_count_desc(final_combos).to_excel(writer, index=False, sheet_name="final_top_combos")
