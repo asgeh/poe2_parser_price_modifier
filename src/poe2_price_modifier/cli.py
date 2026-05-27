@@ -63,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache-path",
         type=Path,
-        default=defaults.cache_path,
-        help="Path to JSON cache file with ids and item data",
+        default=None,
+        help="Path to JSON cache file. Default: auto-generated from item_category + item_type (e.g. cache_jewel_emerald.json)",
     )
     parser.add_argument(
         "--poesessid",

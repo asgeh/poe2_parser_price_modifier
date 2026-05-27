@@ -38,11 +38,19 @@ class PipelineConfig:
     candidate_passes: int = 5
     stop_when_no_new: bool = False
     use_cache: bool = True
-    cache_path: Path = Path("cache.json")
+    cache_path: Optional[Path] = None
     refresh_cache: bool = False
     poesessid: Optional[str] = None
 
     user_agent: str = "Mozilla/5.0 PoE2JewelComboStats/2.0"
+
+    def __post_init__(self) -> None:
+        if self.cache_path is None:
+            parts = [self.item_category]
+            if self.item_type:
+                safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in self.item_type).strip("_")
+                parts.append(safe)
+            self.cache_path = Path(f"cache_{'_'.join(parts)}.json")
 
     def output_name(self) -> str:
         base_name = self.item_name or self.item_type or self.item_category
