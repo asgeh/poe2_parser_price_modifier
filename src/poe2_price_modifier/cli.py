@@ -11,6 +11,7 @@ def build_parser() -> argparse.ArgumentParser:
     defaults = PipelineConfig()
     parser = argparse.ArgumentParser(description="Analyze expensive POE jewel modifiers and export Excel report")
     parser.add_argument("--league", default=defaults.league)
+    parser.add_argument("--item-category", default=defaults.item_category, help="Trade API category, e.g. jewel, amulet, ring, armour.chest")
     parser.add_argument("--item-name", default=defaults.item_name)
     parser.add_argument("--item-type", default=defaults.item_type)
     parser.add_argument("--rarity", default=defaults.jewel_rarity, choices=["magic", "rare", "unique"])
@@ -101,6 +102,7 @@ def main() -> None:
     defaults = PipelineConfig()
     config = PipelineConfig(
         league=args.league,
+        item_category=args.item_category,
         item_name=args.item_name,
         item_type=args.item_type,
         jewel_rarity=args.rarity,

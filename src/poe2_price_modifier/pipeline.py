@@ -180,7 +180,7 @@ class TradeClient:
             "filters": {
                 "type_filters": {
                     "filters": {
-                        "category": {"option": "jewel"},
+                        "category": {"option": self.config.item_category},
                         "rarity": {"option": self.config.jewel_rarity},
                     }
                 },
@@ -456,74 +456,19 @@ def build_count_stat_group(
     )
 
 
+_WEAPON_TAG_RE: dict[str, "re.Pattern[str]"] = {
+    "crossbow": re.compile(r"\bcrossbows?\b"),
+    "spear": re.compile(r"\bspears?\b"),
+    "quarterstaff": re.compile(r"\bquarterstaves?\b|\bquarterstaffs?\b"),
+    "mace": re.compile(r"\bmaces?\b"),
+    "bow": re.compile(r"\bbows?\b"),
+}
+_WEAPON_TAGS: tuple[str, ...] = tuple(sorted(_WEAPON_TAG_RE))
+
+
 def classify_weapon_tags(mod: str) -> set[str]:
     text = mod.lower()
-    tags: set[str] = set()
-    if "crossbow" in text:
-        tags.add("crossbow")
-    if "spear" in text:
-        tags.add("spear")
-    if "quarterstaff" in text or "quarterstave" in text:
-        tags.add("quarterstaff")
-    if "mace" in text:
-        tags.add("mace")
-    if "bow" in text and "crossbow" not in text:
-        tags.add("bow")
-    return tags
-
-
-def extract_weapon_tags(stats_path: Path) -> list[str]:
-    data = json.loads(stats_path.read_text(encoding="utf-8"))
-    texts: list[str] = []
-    for block in data.get("result", []):
-        for entry in block.get("entries", []):
-            text = entry.get("text")
-            if isinstance(text, str):
-                texts.append(text.lower())
-
-    bracket = re.compile(r"\[([^\]|]+)\|([^\]]+)\]")
-    with_pat = re.compile(r"\bwith\s+([a-z][a-z\s-]+)")
-
-    candidates: set[str] = set()
-    for text in texts:
-        for left, right in bracket.findall(text):
-            candidates.add(left.strip())
-            candidates.add(right.strip())
-        for m in with_pat.finditer(text):
-            phrase = m.group(1).strip()
-            phrase = re.split(r"\b(and|or)\b", phrase)[0].strip()
-            if len(phrase.split()) <= 3:
-                candidates.add(phrase)
-
-    # Normalize to canonical weapon tags.
-    mapping = {
-        "bows": "bow",
-        "bow": "bow",
-        "crossbows": "crossbow",
-        "crossbow": "crossbow",
-        "spears": "spear",
-        "spear": "spear",
-        "quarterstaves": "quarterstaff",
-        "quarterstaff": "quarterstaff",
-        "quarterstave": "quarterstaff",
-        "maces": "mace",
-        "mace": "mace",
-    }
-    weapon_roots = ("bow", "crossbow", "spear", "quarterstaff", "mace")
-
-    tags: set[str] = set()
-    for cand in candidates:
-        canon = mapping.get(cand)
-        if canon:
-            tags.add(canon)
-            continue
-        if any(root in cand for root in weapon_roots):
-            for root in weapon_roots:
-                if root in cand:
-                    tags.add(root)
-                    break
-
-    return sorted(tags)
+    return {tag for tag, pat in _WEAPON_TAG_RE.items() if pat.search(text)}
 
 
 def build_weapon_queries(
@@ -531,30 +476,36 @@ def build_weapon_queries(
     config: PipelineConfig,
     stat_map: dict[str, list[str]],
     mods: list[str],
-    weapon_tags: list[str],
+    weapon_tags: tuple[str, ...],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     query_rows: list[dict[str, Any]] = []
     mod_rows: list[dict[str, Any]] = []
 
+    mod_tag_map = {m: classify_weapon_tags(m) for m in mods}
+
     for tag in weapon_tags:
-        tag_mods = [m for m in mods if tag in classify_weapon_tags(m)]
+        tag_mods = [m for m in mods if tag in mod_tag_map[m]]
         if not tag_mods:
             continue
 
-        stat_groups, missing_mods, used_mods = build_count_stat_group(tag_mods, config, stat_map)
-        if stat_groups and stat_groups[0].get("filters"):
-            min_count = min(int(stat_groups[0]["value"]["min"]), len(stat_groups[0]["filters"]))
-            stat_groups[0]["value"]["min"] = min_count
+        try:
+            stat_groups, missing_mods, used_mods = build_count_stat_group(tag_mods, config, stat_map)
+            if stat_groups and stat_groups[0].get("filters"):
+                min_count = min(int(stat_groups[0]["value"]["min"]), len(stat_groups[0]["filters"]))
+                stat_groups[0]["value"]["min"] = min_count
 
-        search = client.trade_search(config.final_min_div, config.max_div, stat_groups=stat_groups)
-        url = make_trade_url(config.base_url, config.realm, config.league, search["id"])
+            search = client.trade_search(config.final_min_div, config.max_div, stat_groups=stat_groups)
+            url = make_trade_url(config.base_url, config.realm, config.league, search["id"])
+        except Exception as exc:
+            LOGGER.warning("weapon query for tag %r skipped: %s", tag, exc)
+            continue
 
         query_rows.append(
             {
                 "weapon_tag": tag,
                 "final_min_div": config.final_min_div,
                 "final_max_div": config.max_div,
-                "count_min_match": stat_groups[0]["value"]["min"] if stat_groups else None,
+                "count_min_match": stat_groups[0]["value"]["min"],
                 "stats_used": len(used_mods),
                 "missing_mods": len(missing_mods),
                 "trade_search_url": url,
@@ -664,13 +615,6 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
     stat_map = load_stat_map(config.stats_path, groups=["explicit", "implicit", "desecrated"])
     client = TradeClient(config)
 
-    cache_before = 0
-    cache_after = 0
-    cache_items_before = 0
-    cache_items_after = 0
-    cache_used = False
-    cache_used_fallback = False
-    cache_migrated = False
     cache_ids: set[str] = set()
     cache_items: list[dict[str, Any]] = []
     if config.use_cache and config.refresh_cache:
@@ -678,17 +622,12 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
         LOGGER.info("Cache cleared: %s", config.cache_path)
 
     if config.use_cache:
-        cache_ids, cache_items, cache_migrated = load_cache_with_legacy(config.cache_path)
-        cache_before = len(cache_ids)
-        cache_items_before = len(cache_items)
-        cache_used = True
+        cache_ids, cache_items, _ = load_cache_with_legacy(config.cache_path)
         if cache_ids and not cache_items:
-            # Id-only cache cannot power analytics; rebuild items by re-fetching.
             LOGGER.warning("Cache contains ids but no items; rebuilding item cache from fresh fetches.")
             cache_ids = set()
 
     candidates, cache_ids = collect_candidates(client, config, known_ids=cache_ids)
-    cache_after = len(cache_ids)
 
     if config.use_cache:
         if not candidates.empty:
@@ -707,11 +646,9 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
                 else:
                     extra_items.append(row)
             cache_items = list(items_by_id.values()) + extra_items
-        cache_items_after = len(cache_items)
         save_cache(config.cache_path, cache_ids, cache_items)
 
     analysis_candidates = pd.DataFrame(cache_items) if (config.use_cache and cache_items) else candidates
-    cache_used_fallback = bool(config.use_cache and cache_items and candidates.empty)
 
     if analysis_candidates.empty:
         LOGGER.warning(
@@ -722,76 +659,36 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         config.output_dir.mkdir(parents=True, exist_ok=True)
         output_path = config.output_dir / f"{config.output_name()}_meta_pipeline_{timestamp}.xlsx"
-        empty_candidates = pd.DataFrame(
-            columns=[
-                "item_id",
-                "price_div",
-                "mods_norm",
-                "explicit_raw",
-                "seller_account",
-                "indexed",
-                "pass_index",
-                "source_min_div",
-                "source_max_div",
-            ]
-        )
-        empty_ranked = pd.DataFrame(columns=["k", "combo", "count", "max"])
+        empty_combos = pd.DataFrame(columns=["k", "combo", "count", "max"])
         empty_mods = pd.DataFrame(columns=["mod", "count", "max", "share_total"])
-        empty_sellers = pd.DataFrame(columns=["seller_account", "count", "max"])
-        empty_mods_by_pass = pd.DataFrame(columns=["pass_index", "mod", "count", "max", "share_pass"])
-        empty_sellers_by_mod = pd.DataFrame(columns=["mod", "seller_account", "count", "share_mod"])
         empty_weapon_queries = pd.DataFrame(
-            columns=[
-                "weapon_tag",
-                "final_min_div",
-                "final_max_div",
-                "count_min_match",
-                "stats_used",
-                "missing_mods",
-                "trade_search_url",
-            ]
+            columns=["weapon_tag", "final_min_div", "final_max_div", "count_min_match", "stats_used", "missing_mods", "trade_search_url"]
         )
-        empty_weapon_mods = pd.DataFrame(columns=["weapon_tag", "mod", "stat_id"])
         empty_final = pd.DataFrame(columns=["price_div", "mods_norm", "explicit_raw"])
 
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            empty_candidates.to_excel(writer, index=False, sheet_name="candidates_raw")
-            empty_ranked.to_excel(writer, index=False, sheet_name="pool_top_combos")
             empty_mods.to_excel(writer, index=False, sheet_name="pool_top_mods")
-            empty_sellers.to_excel(writer, index=False, sheet_name="top_sellers")
-            empty_mods_by_pass.to_excel(writer, index=False, sheet_name="mods_by_pass")
-            empty_sellers_by_mod.to_excel(writer, index=False, sheet_name="top_sellers_by_mod")
+            empty_combos.to_excel(writer, index=False, sheet_name="pool_top_combos")
             empty_weapon_queries.to_excel(writer, index=False, sheet_name="final_query_by_weapon")
-            empty_weapon_mods.to_excel(writer, index=False, sheet_name="final_query_mods_weapon")
-            pd.DataFrame(columns=["mod", "stat_id"]).to_excel(writer, index=False, sheet_name="final_query_mods")
             empty_final.to_excel(writer, index=False, sheet_name="final_raw")
             empty_mods.to_excel(writer, index=False, sheet_name="final_top_mods")
-            empty_ranked.to_excel(writer, index=False, sheet_name="final_top_k2")
-            empty_ranked.to_excel(writer, index=False, sheet_name="final_top_k3")
-            empty_ranked.to_excel(writer, index=False, sheet_name="final_top_k4")
+            empty_combos.to_excel(writer, index=False, sheet_name="final_top_combos")
             pd.DataFrame(
                 [
                     {
-                        "error": "No candidates collected",
-                        "cache_used": cache_used,
-                        "cache_path": str(config.cache_path) if cache_used else None,
-                        "cache_ids_before": cache_before if cache_used else None,
-                        "cache_ids_after": cache_after if cache_used else None,
-                        "cache_items_before": cache_items_before if cache_used else None,
-                        "cache_items_after": cache_items_after if cache_used else None,
-                        "cache_used_fallback": cache_used_fallback if cache_used else None,
-                        "cache_migrated": cache_migrated if cache_used else None,
                         "trade_search_url": None,
-                        "last_query_url": None,
-                        "final_max_div": None,
-                        "final_query_stats_count": 0,
+                        "final_min_div": config.final_min_div,
+                        "count_min_match": config.count_min_match,
+                        "candidates_count": 0,
+                        "final_count": 0,
+                        "missing_mods": 0,
                     }
                 ]
             ).to_excel(writer, index=False, sheet_name="meta")
 
         return PipelineArtifacts(output_file=output_path, candidates_count=0, final_count=0, final_trade_url=None)
 
-    k_targets = [2] if config.jewel_rarity.lower() == "magic" else [3, 4]
+    k_targets = [2] if config.jewel_rarity.lower() == "magic" else [2, 3, 4]
     ranked_frames = [
         analyze_top_k(analysis_candidates, k=k, top_n=config.top_pairs_in_pool, min_count=config.min_count_to_rank)
         for k in k_targets
@@ -803,25 +700,25 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
         LOGGER.warning("No ranked combinations built (insufficient candidates).")
         ranked_combos = pd.DataFrame(columns=["k", "combo", "count", "max"])
     top_mods = analyze_top_mods(analysis_candidates, top_n=config.top_mods_in_pool)
-    top_sellers = analyze_top_sellers(analysis_candidates)
-    top_sellers_by_mod = analyze_top_sellers_by_mod(analysis_candidates)
-    mods_by_pass = analyze_mods_by_pass(analysis_candidates)
-    stat_groups, missing_mods, final_query_mods = build_count_stat_group(top_mods["mod"].tolist(), config, stat_map)
-    weapon_tags = extract_weapon_tags(config.stats_path)
-    LOGGER.info("weapon tags from stats: %s", weapon_tags)
-    weapon_query_rows, weapon_query_mods = build_weapon_queries(
-        client,
-        config,
-        stat_map,
-        top_mods["mod"].tolist(),
-        weapon_tags=weapon_tags,
-    )
+    pool_mods = top_mods["mod"].tolist()
+    stat_groups, missing_mods, _ = build_count_stat_group(pool_mods, config, stat_map)
+    if config.item_category == "jewel":
+        LOGGER.info("weapon tags: %s", _WEAPON_TAGS)
+        weapon_query_rows, _ = build_weapon_queries(
+            client,
+            config,
+            stat_map,
+            pool_mods,
+            weapon_tags=_WEAPON_TAGS,
+        )
+    else:
+        weapon_query_rows = []
 
     final_search = client.trade_search(config.final_min_div, config.max_div, stat_groups=stat_groups)
     final_trade_url = make_trade_url(config.base_url, config.realm, config.league, final_search["id"])
     final_ids = (final_search.get("result") or [])[: config.max_fetch_per_search]
     if not final_ids:
-        raise RuntimeError("Final search returned 0 items")
+        LOGGER.warning("Final search returned 0 items — count query may be too strict for this item category")
 
     final_rows: list[dict[str, Any]] = []
     for i in range(0, len(final_ids), config.fetch_chunk):
@@ -843,62 +740,35 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
             )
 
     final_df = pd.DataFrame(final_rows)
-    if final_df.empty:
-        raise RuntimeError("Final fetch returned no rows")
 
     final_top_mods = analyze_top_mods(final_df, top_n=50)
-    final_top_k2 = analyze_top_k(final_df, k=2, top_n=50, min_count=config.min_count_to_rank)
-    final_top_k3 = analyze_top_k(final_df, k=3, top_n=50, min_count=config.min_count_to_rank)
-    final_top_k4 = analyze_top_k(final_df, k=4, top_n=50, min_count=config.min_count_to_rank)
+    final_combo_frames = [
+        analyze_top_k(final_df, k=k, top_n=50, min_count=config.min_count_to_rank)
+        for k in k_targets
+    ]
+    final_combos = pd.concat([f for f in final_combo_frames if not f.empty], ignore_index=True) if any(not f.empty for f in final_combo_frames) else pd.DataFrame(columns=["k", "combo", "count", "max"])
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     config.output_dir.mkdir(parents=True, exist_ok=True)
     output_path = config.output_dir / f"{config.output_name()}_meta_pipeline_{timestamp}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        analysis_candidates.to_excel(writer, index=False, sheet_name="candidates_raw")
-        if config.use_cache:
-            candidates.to_excel(writer, index=False, sheet_name="candidates_new")
-        sort_by_count_desc(ranked_combos).to_excel(writer, index=False, sheet_name="pool_top_combos")
         sort_by_count_desc(top_mods).to_excel(writer, index=False, sheet_name="pool_top_mods")
-        sort_by_count_desc(top_sellers).to_excel(writer, index=False, sheet_name="top_sellers")
-        top_sellers_by_mod.to_excel(writer, index=False, sheet_name="top_sellers_by_mod")
-        mods_by_pass.to_excel(writer, index=False, sheet_name="mods_by_pass")
-        pd.DataFrame(final_query_mods).to_excel(writer, index=False, sheet_name="final_query_mods")
+        sort_by_count_desc(ranked_combos).to_excel(writer, index=False, sheet_name="pool_top_combos")
         pd.DataFrame(weapon_query_rows).to_excel(writer, index=False, sheet_name="final_query_by_weapon")
-        pd.DataFrame(weapon_query_mods).to_excel(writer, index=False, sheet_name="final_query_mods_weapon")
-
         final_df.to_excel(writer, index=False, sheet_name="final_raw")
         sort_by_count_desc(final_top_mods).to_excel(writer, index=False, sheet_name="final_top_mods")
-        if not final_top_k2.empty:
-            sort_by_count_desc(final_top_k2).to_excel(writer, index=False, sheet_name="final_top_k2")
-        if not final_top_k3.empty:
-            sort_by_count_desc(final_top_k3).to_excel(writer, index=False, sheet_name="final_top_k3")
-        if not final_top_k4.empty:
-            sort_by_count_desc(final_top_k4).to_excel(writer, index=False, sheet_name="final_top_k4")
+        sort_by_count_desc(final_combos).to_excel(writer, index=False, sheet_name="final_top_combos")
 
         meta_df = pd.DataFrame(
             [
                 {
                     "trade_search_url": final_trade_url,
-                    "last_query_url": final_trade_url,
                     "final_min_div": config.final_min_div,
-                    "final_max_div": config.max_div,
                     "count_min_match": config.count_min_match,
-                    "final_query_stats_count": len(final_query_mods),
+                    "candidates_count": len(analysis_candidates),
+                    "final_count": len(final_df),
                     "missing_mods": len(missing_mods),
-                    "candidates_rows": len(analysis_candidates),
-                    "new_candidates_rows": len(candidates),
-                    "final_rows": len(final_df),
-                    "unique_sellers": analysis_candidates["seller_account"].nunique() if "seller_account" in analysis_candidates else None,
-                    "cache_used": cache_used,
-                    "cache_path": str(config.cache_path) if cache_used else None,
-                    "cache_ids_before": cache_before if cache_used else None,
-                    "cache_ids_after": cache_after if cache_used else None,
-                    "cache_items_before": cache_items_before if cache_used else None,
-                    "cache_items_after": cache_items_after if cache_used else None,
-                    "cache_used_fallback": cache_used_fallback if cache_used else None,
-                    "cache_migrated": cache_migrated if cache_used else None,
                 }
             ]
         )
@@ -906,17 +776,11 @@ def run_pipeline(config: PipelineConfig) -> PipelineArtifacts:
 
         ws_meta = writer.sheets.get("meta")
         if ws_meta is not None:
-            def _set_url_link(column_name: str) -> None:
-                if column_name not in meta_df.columns:
-                    return
-                col_idx = meta_df.columns.get_loc(column_name) + 1
-                cell = ws_meta.cell(row=2, column=col_idx)
-                if isinstance(cell.value, str) and cell.value.startswith("http"):
-                    cell.hyperlink = cell.value
-                    cell.style = "Hyperlink"
-
-            _set_url_link("trade_search_url")
-            _set_url_link("last_query_url")
+            col_idx = meta_df.columns.get_loc("trade_search_url") + 1
+            cell = ws_meta.cell(row=2, column=col_idx)
+            if isinstance(cell.value, str) and cell.value.startswith("http"):
+                cell.hyperlink = cell.value
+                cell.style = "Hyperlink"
 
     return PipelineArtifacts(
         output_file=output_path,
